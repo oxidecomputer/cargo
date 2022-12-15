@@ -158,16 +158,14 @@ impl GitDatabase {
         // A non-fresh checkout can happen if the checkout operation was
         // interrupted. In that case, the checkout gets deleted and a new
         // clone is created.
-        let checkout = match git2::Repository::open(dest)
+        match git2::Repository::open(dest)
             .ok()
             .map(|repo| GitCheckout::new(dest, self, rev, repo))
             .filter(|co| co.is_fresh())
         {
-            Some(co) => co,
-            None => GitCheckout::clone_into(dest, self, rev, cargo_config)?,
-        };
-        checkout.update_submodules(cargo_config, parent_remote_url)?;
-        Ok(checkout)
+            Some(co) => Ok(co),
+            None => GitCheckout::clone_into(dest, self, rev, cargo_config, parent_remote_url),
+        }
     }
 
     pub fn to_short_id(&self, revision: git2::Oid) -> CargoResult<GitShortID> {
@@ -249,6 +247,7 @@ impl<'a> GitCheckout<'a> {
         database: &'a GitDatabase,
         revision: git2::Oid,
         config: &Config,
+        parent_remote_url: &Url,
     ) -> CargoResult<GitCheckout<'a>> {
         let dirname = into.parent().unwrap();
         paths::create_dir_all(&dirname)?;
@@ -286,7 +285,7 @@ impl<'a> GitCheckout<'a> {
         let repo = repo.unwrap();
 
         let checkout = GitCheckout::new(into, database, revision, repo);
-        checkout.reset(config)?;
+        checkout.reset(config, parent_remote_url)?;
         Ok(checkout)
     }
 
@@ -300,15 +299,16 @@ impl<'a> GitCheckout<'a> {
         }
     }
 
-    fn reset(&self, config: &Config) -> CargoResult<()> {
+    fn reset(&self, config: &Config, parent_remote_url: &Url) -> CargoResult<()> {
         // If we're interrupted while performing this reset (e.g., we die because
         // of a signal) Cargo needs to be sure to try to check out this repo
         // again on the next go-round.
         //
         // To enable this we have a dummy file in our checkout, .cargo-ok, which
-        // if present means that the repo has been successfully reset and is
-        // ready to go. Hence if we start to do a reset, we make sure this file
-        // *doesn't* exist, and then once we're done we create the file.
+        // if present means that the repo has been successfully reset (including
+        // loading submodules) and is ready to go. Hence if we start to do a
+        // reset, we make sure this file *doesn't* exist, and then once we're
+        // done we create the file.
         let ok_file = self.location.join(".cargo-ok");
         let _ = paths::remove_file(&ok_file);
         info!("reset {} to {}", self.repo.path().display(), self.revision);
@@ -320,6 +320,7 @@ impl<'a> GitCheckout<'a> {
 
         let object = self.repo.find_object(self.revision, None)?;
         reset(&self.repo, &object, config)?;
+        self.update_submodules(config, parent_remote_url)?;
         paths::create(ok_file)?;
         Ok(())
     }
